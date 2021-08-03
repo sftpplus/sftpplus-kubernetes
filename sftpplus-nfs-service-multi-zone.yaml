@@ -1,0 +1,130 @@
+# USAGE:
+#
+# This is the Part-1 from deploying an SFTPPlus application
+# backed by a shared persistence disk available via the NFS server.
+#
+# This handles the creation of the NFS server.
+# Part-2 will handle the creation of the SFTPPlus application.
+#
+# After updating the content of this file, you can copy it into your
+# kubernetes cluster control system and apply the changes using:
+#
+#  kubectl apply -f sftpplus-nfs-service-multi-zone.yaml
+#
+# WARNING: This will deploy the SFTPPlus application with public access
+#          available over the internet with the default username and password.
+#
+
+#
+# GKE by default has no multi-zone storage class.
+#
+kind: StorageClass
+apiVersion: storage.k8s.io/v1
+metadata:
+  name: replicated-disk-eu-central2-a-b
+provisioner: kubernetes.io/gce-pd
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: pd-ssd
+  replication-type: regional-pd
+  zones: europe-central2-a, europe-central2-b
+
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: nfs-server-replicated-pvc
+spec:
+  storageClassName: replicated-disk-eu-central2-a-b
+  resources:
+    requests:
+      storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    role: nfs-server
+  name: nfs-server
+  namespace: default
+spec:
+  ports:
+  - name: 2049-to-2049-tcp
+    port: 2049
+    protocol: TCP
+    targetPort: 2049
+  - name: 20048-to-20048-tcp
+    port: 20048
+    protocol: TCP
+    targetPort: 20048
+  - name: 111-to-111-tcp
+    port: 111
+    protocol: TCP
+    targetPort: 111
+  selector:
+    role: nfs-server
+  sessionAffinity: None
+  type: ClusterIP
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: nfs-server
+  name: nfs-server
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      role: nfs-server
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        role: nfs-server
+    spec:
+      containers:
+      - image: gcr.io/google_containers/volume-nfs:0.8
+        imagePullPolicy: IfNotPresent
+        name: nfs-server
+        ports:
+        - containerPort: 2049
+          name: nfs
+          protocol: TCP
+        - containerPort: 20048
+          name: mountd
+          protocol: TCP
+        - containerPort: 111
+          name: rpcbind
+          protocol: TCP
+        resources: {}
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /exports
+          name: nfs-disk
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: nfs-disk
+        persistentVolumeClaim:
+          claimName: nfs-server-replicated-pvc

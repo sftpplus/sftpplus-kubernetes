@@ -1,0 +1,128 @@
+# USAGE:
+#
+# This is the Part-2 from deploying an SFTPPlus application
+# backed by a shared persistence disk available via the NFS server.
+#
+# This handles the creation of the SFTPPlus application.
+# Part-1 handles the creation of the NFS server.
+#
+# NOTE: You will need to replace NFS-SERVER-CLUSTER-IP with the IP address
+#       of your NFS server.
+#
+# After updating the content of this file, you can copy it into your
+# kubernetes cluster control system and apply the changes using:
+#
+#  kubectl apply -f sftpplus-nfs-application.yaml
+#
+# WARNING: This will deploy the SFTPPlus application with public access
+#          available over the internet with the default username and password.
+#
+
+# The persistent Volume can only be created once.
+# After this change is applied, you should manually delete
+# it from the YAML file or from the cluster using
+# kubectl delete persistencevolumes nfs-pv
+# kubectl delete persistencevolumeclaims nfs-pvc
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: nfs-pv
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  nfs:
+    server: NFS-SERVER-CLUSTER-IP
+    path: "/"
+
+---
+
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: nfs-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  resources:
+    requests:
+      storage: 10Gi
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  finalizers:
+  - service.kubernetes.io/load-balancer-cleanup
+  labels:
+    app: sftpplus-app
+  name: sftpplus-app-load-balancer
+  namespace: default
+spec:
+  externalTrafficPolicy: Cluster
+  ports:
+  - name: 443-to-10443-tcp
+    nodePort: 32013
+    port: 443
+    protocol: TCP
+    targetPort: 10443
+  - name: 22-to-10022-tcp
+    nodePort: 32045
+    port: 22
+    protocol: TCP
+    targetPort: 10022
+  selector:
+    app: sftpplus-app
+  sessionAffinity: None
+  type: LoadBalancer
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: sftpplus-app
+  name: sftpplus-app
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: sftpplus-app
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: sftpplus-app
+    spec:
+      containers:
+      - image: proatria/sftpplus-trial
+        imagePullPolicy: Always
+        name: sftpplus-trial
+        resources: {}
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /srv/storage
+          name: nfs-server
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: nfs-server
+        persistentVolumeClaim:
+          claimName: nfs-pvc

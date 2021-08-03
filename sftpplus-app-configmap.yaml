@@ -1,0 +1,268 @@
+# USAGE:
+#
+# After updating the content of this file, you can copy it into your
+# kubernetes cluster control system and apply the changes using:
+#
+#  kubectl apply -f sftpplus-app-configmap.yaml
+#
+# WARNING: This will deploy the SFTPPlus application with public access
+#          available over the internet.
+#
+# NOTE: You will need to edit this file and update the certificate, key and
+#       SSH key from the 'sftpplus.secrets' Secret object.
+#
+# NOTE: You will need to update the passwords for the default administrator
+#       and user.
+#       Passwords can be generated using the SFTPPlus helper tools
+#       ./bin/admin-commands.sh generate-password
+#
+apiVersion: v1
+data:
+  server.ini: |
+
+    [administrators/DEFAULT-ADMINISTRATOR-UUID]
+    enabled = Yes
+    name = admin
+    password = ADD-YOUR-ADMIN-ENCRYPTED-PASSWORD
+    role = DEFAULT-ROLE
+
+    [accounts/bdb99c31-1119-4b8b-b609-63672a9a0b6f]
+    name = test_user
+    type = application
+    enabled = yes
+    group = DEFAULT_GROUP
+    home_folder_path = /srv/storage/test_user
+    password = ADD-YOUR-USER-ENCRYPTED-PASSWORD
+
+    [server]
+    uuid = single-server-uuid
+    name = sftpplus-pod
+    authentications = username-blocker-uuid, ban-ip-uuid, DEFAULT-AUTHENTICATION
+    manager_authentications = ban-ip-uuid, DEFAULT-AUTHENTICATION
+    password_minimum_strength = 4
+    password_minimum_length = 8
+    password_hashing_scheme = crypt-sha512
+
+    ssl_certificate = /opt/sftpplus/secrets/server_certificate.pem
+    ssh_host_private_keys = /opt/sftpplus/secrets/ssh_host_rsa_key
+
+    [authentications/DEFAULT-AUTHENTICATION]
+    enabled = Yes
+    type = application
+    name = SFTPPlus Accounts and Administrators
+    description = This authentication method allows authentication of accounts
+        and administrators defined in this configuration file.
+
+    [authentications/username-blocker-uuid]
+    enabled = Yes
+    type = deny-username
+    name = Deny Admin Accounts
+    description = Deny all administrator accounts.
+    ; You can add more accounts to the list.
+    usernames = root, adm, admin, administrator
+
+
+    [authentications/ban-ip-uuid]
+    enabled = Yes
+    type = ip-time-ban
+    name = Ban IP with multiple failures
+    description = Will ban the source IP for 10 minutes after 10 consecutive failures.
+    ban_interval = 600
+    ban_after_count = 10
+
+    [event-handlers/e137661a-150d-48f4-9239-4d9661492c11]
+    enabled = True
+    type = standard-stream
+    name = Standard Output Logger
+    entry_content = {timestamp.iso_8601_local} {id} {component.uuid} {account.name} {account.peer.address}:{account.peer.port} {message}
+
+    [services/DEFAULT-MANAGER]
+    enabled = Yes
+    name = local-manager
+    type = manager
+    address = 0.0.0.0
+    port = 10020
+    ssl_cipher_list = secure
+    ssl_allowed_methods = tlsv1.2 tlsv1.3
+
+
+    [services/sftp-1]
+    enabled = Yes
+    name = sftp-service
+    type = ssh
+    sftp = Yes
+    scp = No
+    address = 0.0.0.0
+    port = 10022
+    ssh_cipher_list = secure
+    ignore_create_permissions = No
+    idle_connection_timeout = 300
+    maximum_concurrent_connections = Disabled
+
+    [services/https-1]
+    enabled = Yes
+    name = https
+    protocol = https
+    address = 0.0.0.0
+    port = 10443
+
+    [resources/DEFAULT-LETS-ENCRYPT]
+    enabled = no
+    name = Lets-Encrypt-Client
+    type = lets-encrypt
+
+    [resources/DEFAULT-SQLITE]
+    name = Embedded DB
+    type = sqlite
+    path = log/cache.db3
+
+    [resources/DEFAULT-EMAIL-CLIENT]
+    name = Email-Client
+    type = email-client
+    email_from_address = sftpplus@example.com
+    email_to_recipients = admin-team@example.com
+    address = smtp.example.com
+    port = 25
+
+    [resources/DEFAULT-ANALYTICS]
+    enabled = Yes
+    type = analytics
+    name = Analytics engine
+    monitor_interval = 600
+
+    [roles/DEFAULT-ROLE]
+    enabled = Yes
+    name = Default Super-Administrators
+
+    [groups/DEFAULT_GROUP]
+    name = DEFAULT_GROUP
+    enabled = Yes
+    home_folder_path = /srv/home
+    create_home_folder = Yes
+
+kind: ConfigMap
+metadata:
+  name: sftpplus.configuration
+  namespace: default
+
+---
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sftpplus.secrets
+  namespace: default
+type: Opaque
+stringData:
+  server_certificate.pem: |
+    -----BEGIN RSA PRIVATE KEY-----
+    MIIEowIBAAKCAQEAr/kWt5Oa5/Ic1T77mv6QPSxlx1FJJuldLEXuaQDYMYgF047e
+    I
+    REPLACE WITH YOUR CERTIFICATE
+    I
+    tevLnZxgFJeWiR4qQPN8rK56w1NoAlOdl3Tmvui8pncnZY0XBFuY
+    -----END RSA PRIVATE KEY-----
+    -----BEGIN CERTIFICATE-----
+    MIIDSjCCAjKgAwIBAgIINeDD1hKOLpYwDQYJKoZIhvcNAQELBQAwMjELMAkGA1UE
+    I
+    REPLACE WITH YOUR KEY
+    I
+    yE8jNrkL9QBSUHV/Dh9MO8Y2AxXpHnknAhIZ5sPL
+    -----END CERTIFICATE-----
+
+  ssh_host_rsa_key: |
+    -----BEGIN RSA PRIVATE KEY-----
+    MIICWwIBAAKBgQC4fV6tSakDSB6ZovygLsf1iC9P3tJHePTKAPkPAWzlu5BRHcmA
+    I
+    REPLACE WITH YOUR KEY
+    I
+    LqHYUobNanxB+7Msi4f3gYyuKdOGnWHqD2U4HcLdMQ==
+    -----END RSA PRIVATE KEY-----
+
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  finalizers:
+  - service.kubernetes.io/load-balancer-cleanup
+  labels:
+    app: sftpplus-app
+  name: sftpplus-app-load-balancer
+  namespace: default
+spec:
+  externalTrafficPolicy: Cluster
+  ports:
+  - name: 10020-to-10020-tcp
+    nodePort: 30500
+    port: 10020
+    protocol: TCP
+    targetPort: 10020
+  - name: 443-to-10443-tcp
+    nodePort: 32013
+    port: 443
+    protocol: TCP
+    targetPort: 10443
+  - name: 22-to-10022-tcp
+    nodePort: 32045
+    port: 22
+    protocol: TCP
+    targetPort: 10022
+  selector:
+    app: sftpplus-app
+  sessionAffinity: None
+  type: LoadBalancer
+
+---
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    app: sftpplus-app
+  name: sftpplus-app
+  namespace: default
+spec:
+  progressDeadlineSeconds: 600
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: sftpplus-app
+  strategy:
+    rollingUpdate:
+      maxSurge: 25%
+      maxUnavailable: 25%
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: sftpplus-app
+    spec:
+      containers:
+      - image: proatria/sftpplus-trial
+        imagePullPolicy: Always
+        name: sftpplus-trial
+        resources: {}
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /opt/sftpplus/configuration
+          name: sftpplus-configuration
+        - mountPath: /opt/sftpplus/secrets
+          name: sftpplus-secrets
+
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      - name: sftpplus-configuration
+        configMap:
+          name: sftpplus.configuration
+      - name: sftpplus-secrets
+        secret:
+          secretName: sftpplus.secrets

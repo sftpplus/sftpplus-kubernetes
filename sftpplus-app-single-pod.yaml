@@ -1,0 +1,97 @@
+# USAGE:
+#
+# After updating the content of this file, you can copy it into your
+# kubernetes cluster control system and apply the changes using:
+#
+#  kubectl apply -f sftpplus-app-single-pod.yaml
+#
+# NOTE: This example uses the Google Compute Engine disk storage that is
+#       manually created and directly attached to the pod, without using
+#      a colume claim
+#
+# WARNING: This will deploy the SFTPPlus application with public access
+#          available over the internet with the default username and password.
+#
+---
+
+apiVersion: v1
+kind: Service
+metadata:
+  finalizers:
+  - service.kubernetes.io/load-balancer-cleanup
+  labels:
+    app: sftpplus-app
+  name: sftpplus-app-load-balancer
+  namespace: default
+spec:
+  externalTrafficPolicy: Cluster
+  ports:
+  - name: 10020-to-10020-tcp
+    nodePort: 30500
+    port: 10020
+    protocol: TCP
+    targetPort: 10020
+  - name: 443-to-10443-tcp
+    nodePort: 32013
+    port: 443
+    protocol: TCP
+    targetPort: 10443
+  - name: 22-to-10022-tcp
+    nodePort: 32045
+    port: 22
+    protocol: TCP
+    targetPort: 10022
+  selector:
+    app: sftpplus-app
+  sessionAffinity: None
+  type: LoadBalancer
+
+---
+
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  labels:
+    app: sftpplus-app
+  name: sftpplus-app
+  namespace: default
+spec:
+  replicas: 1
+  serviceName: "sftpplus-app"
+  selector:
+    matchLabels:
+      app: sftpplus-app
+  template:
+    metadata:
+      labels:
+        app: sftpplus-app
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - image: proatria/sftpplus-trial:4.12.0-cloud
+        imagePullPolicy: Always
+        name: sftpplus-trial
+        env:
+        - name: SFTPPLUS_CONFIGURATION
+          value: /srv/storage/configuration
+        resources: {}
+        securityContext:
+          privileged: true
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /srv/storage
+          name: sftpplus-disk
+
+      dnsPolicy: ClusterFirst
+      restartPolicy: Always
+      schedulerName: default-scheduler
+      securityContext: {}
+      terminationGracePeriodSeconds: 30
+      volumes:
+      # Depending on your Kubernetes service you might need to use
+      # a different persistence volume.
+      - gcePersistentDisk:
+          fsType: ext4
+          pdName: sftpplus-disk
+        name: sftpplus-disk
