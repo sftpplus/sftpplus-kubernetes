@@ -6,7 +6,7 @@
 # This handles the creation of the NFS server.
 # Part-2 will handle the creation of the SFTPPlus application.
 #
-# After updating the content of this file, you can copy it into your
+# After updating the content of this file, you can copy it tp your
 # kubernetes cluster control system and apply the changes using:
 #
 #  kubectl apply -f sftpplus-nfs-service-multi-zone.yaml

@@ -1,6 +1,6 @@
 # USAGE:
 #
-# After updating the content of this file, you can copy it into your
+# After updating the content of this file, you can copy it to your
 # kubernetes cluster control system and apply the changes using:
 #
 #  kubectl apply -f sftpplus-app-configmap.yaml

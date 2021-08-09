@@ -9,7 +9,7 @@
 # NOTE: You will need to replace NFS-SERVER-CLUSTER-IP with the IP address
 #       of your NFS server.
 #
-# After updating the content of this file, you can copy it into your
+# After updating the content of this file, you can copy it to your
 # kubernetes cluster control system and apply the changes using:
 #
 #  kubectl apply -f sftpplus-nfs-application.yaml
