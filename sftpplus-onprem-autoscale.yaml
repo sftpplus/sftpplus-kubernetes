@@ -1,0 +1,614 @@
+#
+# This is the deployment of SFTPPlus application in our on-prem k8s
+# as a test.
+#
+# It is designed to work with a single persistence volume that is used for both
+# configuration and user files.
+#
+# It is designed to start with a blank/empty persistence.
+#
+# Check allocated ports using:
+# kubectl -n manual-tests get svc
+#
+#===============================================================================
+#
+# This is the actual configuration for worker (non-admin) nodes.
+# They can be scaled and they are handling the file transfers.
+# Update this ConfigMap to change the configuration of the file servers.
+#
+# If you are making configuration to the content of this file,
+# change the name of the config map and also update the deployment.
+#
+# Otherwise, the ConfigMap is cached by the cluster and will not always be
+# reloaded.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sftpplus-worker-config-v1
+  namespace: manual-tests
+data:
+  server.ini: |
+    [server]
+    uuid = worker-uuid
+    name = sftpplus-worker
+    authentications = username-blocker-uuid, ban-ip-uuid, shared-users-uuid
+
+    ssl_certificate = /opt/sftpplus-storage/configuration/ssl_certificate.pem
+    ssh_host_private_keys = /opt/sftpplus-storage/configuration/ssh_host_private_keys
+
+    [authentications/shared-users-uuid]
+    enabled: yes
+    type: local-file
+    name: Auth from Local File
+    path: /opt/sftpplus-storage/configuration/users.ini
+    external_management = yes
+
+    [authentications/DEFAULT-AUTHENTICATION]
+    enabled = Yes
+    type = application
+    name = SFTPPlus Accounts and Administrators
+    description = This authentication method allows authentication of accounts
+        and administrators defined in this configuration file.
+
+    [authentications/username-blocker-uuid]
+    enabled = Yes
+    type = deny-username
+    name = Deny Admin Accounts
+    description = Deny all administrator accounts.
+    ; You can add more accounts to the list.
+    usernames = root, adm, admin, administrator
+
+    [authentications/ban-ip-uuid]
+    enabled = Yes
+    type = ip-time-ban
+    name = Ban IP with multiple failures
+    description = Will ban the source IP for 10 minutes after 10 consecutive failures.
+    ban_interval = 600
+    ban_after_count = 10
+
+    [event-handlers/e137661a-150d-48f4-9239-4d9661492c11]
+    enabled = True
+    type = standard-stream
+    name = Standard Output Logger
+    entry_content = {timestamp.iso_8601_local} {id} {component.uuid} {account.name} {account.peer.address}:{account.peer.port} {message}
+
+    [services/DEFAULT-MANAGER]
+    enabled = No
+    name = local-manager
+    type = manager
+    description = Admin UI is disabled for worker nodes.
+    address = 0.0.0.0
+    port = 10020
+
+    [services/sftp-1]
+    enabled = Yes
+    name = sftp-service
+    type = ssh
+    sftp = Yes
+    scp = No
+    address = 0.0.0.0
+    port = 10022
+    ssh_cipher_list = secure
+    ignore_create_permissions = No
+    idle_connection_timeout = 300
+    maximum_concurrent_connections = Disabled
+
+    [services/https-1]
+    enabled = Yes
+    name = https
+    protocol = https
+    address = 0.0.0.0
+    port = 10443
+    ui_version: ui-gen-2
+
+    [resources/DEFAULT-LETS-ENCRYPT]
+    enabled = no
+    name = Lets-Encrypt-Client
+    type = lets-encrypt
+
+    [resources/DEFAULT-SQLITE]
+    name = Embedded DB
+    type = sqlite
+    path = /tmp/cache.db3
+
+    [resources/DEFAULT-EMAIL-CLIENT]
+    name = Email-Client
+    type = email-client
+    email_from_address = sftpplus@example.com
+    email_to_recipients = admin-team@example.com
+    address = smtp.example.com
+    port = 25
+
+    [resources/DEFAULT-ANALYTICS]
+    enabled = Yes
+    type = analytics
+    name = Analytics engine
+    monitor_interval = 600
+    description = Check resource usage every 10 minutes.
+
+    [roles/DEFAULT-ROLE]
+    enabled = No
+    name = Default role not used for workers
+
+    [groups/DEFAULT_GROUP]
+    enabled = No
+    name = Default group not used for workers
+
+    [administrators/DEFAULT-ADMINISTRATOR-UUID]
+    enabled = No
+    name = Default admin not used for workers
+
+  # This is the script used to make sure the worker containers configuration
+  # is initialized.
+  worker-init.sh: |
+    cd /opt/sftpplus
+    SFTPPLUS_CONFIGURATION=/opt/sftpplus-storage/configuration
+    USERS_DIR=/opt/sftpplus-storage/users/
+    mkdir -p $USERS_DIR
+    mkdir -p $SFTPPLUS_CONFIGURATION
+
+    if [ ! -f $SFTPPLUS_CONFIGURATION/ssl_certificate.pem ]; then
+      echo "Generating TLS self-signed certificate ..."
+      ./bin/admin-commands.sh generate-self-signed \
+        --common-name=sftpplus-docker.example.com \
+        --key-size=2048 \
+        --sign-algorithm=sha256 \
+        > ${SFTPPLUS_CONFIGURATION}/ssl_certificate.pem
+    fi
+
+    if [ ! -f $SFTPPLUS_CONFIGURATION/ssh_host_private_keys ]; then
+      echo "Generating SSH host private key ..."
+      ./bin/admin-commands.sh generate-ssh-key \
+        --key-file=${SFTPPLUS_CONFIGURATION}/ssh_host_private_keys \
+        --key-type=rsa \
+        --key-size=2048
+      # Cleanup public key as we don't need it.
+      rm ${SFTPPLUS_CONFIGURATION}/ssh_host_private_keys.pub
+    fi
+
+    if [ ! -f $SFTPPLUS_CONFIGURATION/users.ini ]; then
+      echo "Creating the default user and group..."
+      echo "
+    [groups/EXTERNAL-DEFAULT-GROUP]
+    name: Default Shared Group
+    enabled: Yes
+    home_folder_path: $USERS_DIR
+    create_home_folder: yes
+
+    [accounts/test-user-uuid]
+    enabled: Yes
+    name: test_user
+    password:
+
+    group: EXTERNAL-DEFAULT-GROUP
+    create_home_folder: inherit
+    " > $SFTPPLUS_CONFIGURATION/users.ini
+    fi
+    echo "Configuration initialization done."
+
+---
+#
+# This is the initial configuration for web admin node.
+# Only a single pod can be active for wed admin.
+# Once the web admin configuration is initialized this configuration
+# is no longer used.
+# Instead the configuration from the persistance is used.
+#
+# Default with: test_admin.
+# Generate the password using "bin/admin-commands generate-password"
+# If you are making configuration to the content of this file,
+# change the name of the config map and also update the deployment.
+#
+# Otherwise, the ConfigMap is cached by the cluster and will not always be
+# reloaded.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sftpplus-admin-init-v1
+  namespace: manual-tests
+data:
+  server.ini.init: |
+    [server]
+    uuid = admin-uuid
+    name = sftpplus-admin
+    product_key = server-only
+    ssl_certificate = /opt/sftpplus-storage/configuration/ssl_certificate.pem
+    ssh_host_private_keys = /opt/sftpplus-storage/configuration/ssh_host_private_keys
+
+    [administrators/DEFAULT-ADMINISTRATOR-UUID]
+    enabled = yes
+    name = test_admin
+    password = ADD YOUR PASSWORD HASH GENERATED USING admin-commands generate-password
+    roles = DEFAULT-ROLE
+
+    [authentications/shared-users-uuid]
+    enabled: yes
+    type: local-file
+    name: Auth from Local File
+    path: /opt/sftpplus-storage/configuration/users.ini
+    external_management = no
+
+    [authentications/DEFAULT-AUTHENTICATION]
+    enabled = Yes
+    type = application
+    name = SFTPPlus Accounts and Administrators
+    description = This authentication method allows authentication of accounts
+        and administrators defined in this configuration file.
+
+    [authentications/username-blocker-uuid]
+    enabled = Yes
+    type = deny-username
+    name = Deny Admin Accounts
+    description = Deny all administrator accounts.
+    ; You can add more accounts to the list.
+    usernames = root, adm, admin, administrator
+
+    [authentications/ban-ip-uuid]
+    enabled = Yes
+    type = ip-time-ban
+    name = Ban IP with multiple failures
+    description = Will ban the source IP for 10 minutes after 10 consecutive failures.
+    ban_interval = 600
+    ban_after_count = 10
+
+    [event-handlers/e137661a-150d-48f4-9239-4d9661492c11]
+    enabled = True
+    type = standard-stream
+    name = Standard Output Logger
+    entry_content = {timestamp.iso_8601_local} {id} {component.uuid} {account.name} {account.peer.address}:{account.peer.port} {message}
+
+    [services/DEFAULT-MANAGER]
+    enabled = yes
+    name = local-manager
+    type = manager
+    address = 0.0.0.0
+    port = 10020
+    authentication = ban-ip-uuid, DEFAULT-AUTHENTICATION
+
+    [services/DEFAULT-MANAGER-UNSECURED]
+    enabled = yes
+    name = local-manager-unsecured
+    type = _manager_unsecured
+    address = 0.0.0.0
+    port = 10019
+    authentication = ban-ip-uuid, DEFAULT-AUTHENTICATION
+
+
+    [resources/DEFAULT-LETS-ENCRYPT]
+    enabled = no
+    name = Lets-Encrypt-Client
+    type = lets-encrypt
+
+    [resources/DEFAULT-SQLITE]
+    name = Embedded DB
+    type = sqlite
+    path = /opt/sftpplus-storage/configuration/cache.db3
+
+    [resources/DEFAULT-EMAIL-CLIENT]
+    name = Email-Client
+    type = email-client
+    email_from_address = sftpplus@example.com
+    email_to_recipients = admin-team@example.com
+    address = smtp.example.com
+    port = 25
+
+    [resources/DEFAULT-ANALYTICS]
+    enabled = Yes
+    type = analytics
+    name = Analytics engine
+    monitor_interval = 600
+    description = Check resource usage every 10 minutes.
+
+    [roles/DEFAULT-ROLE]
+    enabled = yes
+    name = Default role not used for workers
+
+    [groups/DEFAULT_GROUP]
+    enabled = No
+    name = Default group not used for workers
+
+  # This is the script used to make sure the admin config is initialized.
+  admin-init.sh: |
+    #
+    # $SFTPPLUS_CONFIGURATION is provided by the pod environment.
+    #
+    if [ ! -f $SFTPPLUS_CONFIGURATION/server.ini ]; then
+      echo "Initializing admin config..."
+      cp /opt/sftpplus/configuration/server.ini.init ${SFTPPLUS_CONFIGURATION}/server.ini
+    fi
+
+    SSL_CERTIFICATE=${SFTPPLUS_CONFIGURATION}/ssl_certificate.pem
+    until [ -f $SSL_CERTIFICATE ]; do
+        echo "Waiting for TLS certificate init via the worker pod..."
+        sleep 5
+    done
+    echo "Certificate found"
+    ls -al $SFTPPLUS_CONFIGURATION
+    exit 0
+
+---
+#
+# The storage for user files and TLS certificates and SSH keys.
+#
+kind: PersistentVolumeClaim
+apiVersion: v1
+metadata:
+  name: sftpplus-storage
+  namespace: manual-tests
+spec:
+  storageClassName: openebs-hostpath
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1G
+
+---
+# SFTPPlus workers
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sftpplus-worker
+  namespace: manual-tests
+  labels:
+    app: sftpplus-worker
+spec:
+  # Do the initial deployment with 1 replica,
+  # to allow the initial configuration setup.
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: sftpplus-worker
+  template:
+    metadata:
+      name: sftpplus-worker
+      namespace: manual-tests
+      labels:
+        app: sftpplus-worker
+
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: 'OnRootMismatch'
+
+      imagePullSecrets:
+        - name: ghcr.io-pat-adi-k8s-pull
+
+      # initContainers can be removed of the configuration was already
+      # initialized.
+      restartPolicy: Always
+      initContainers:
+        - name: sftpplus-worker-init
+          image: proatria/sftpplus-trial:latest
+          #image: ghcr.io/chevah/sftpplus-trial:latest
+          command: ['/bin/sh']
+          args: ['/opt/sftpplus/configuration/worker-init.sh']
+          volumeMounts:
+            - name: sftpplus-storage
+              mountPath: /opt/sftpplus-storage
+            - name: sftpplus-worker-config
+              mountPath: /opt/sftpplus/configuration
+
+      containers:
+        - name: worker
+          image: proatria/sftpplus-trial:latest
+          #image: ghcr.io/chevah/sftpplus-trial:latest
+          imagePullPolicy: Always
+          command: ['/bin/sh']
+          args: ['/opt/sftpplus-docker-entrypoint.sh']
+          ports:
+            - name: sftp
+              containerPort: 10022
+            - name: https
+              containerPort: 10443
+          volumeMounts:
+            - name: sftpplus-storage
+              mountPath: /opt/sftpplus-storage
+            - name: sftpplus-worker-config
+              mountPath: /opt/sftpplus/configuration
+
+      volumes:
+        - name: sftpplus-storage
+          persistentVolumeClaim:
+            claimName: sftpplus-storage
+        - name: sftpplus-worker-config
+          configMap:
+            name: sftpplus-worker-config-v1
+
+      # # Deploy on nieves
+      # nodeSelector:
+      #   kubernetes.io/hostname: nieves
+      # Deploy on control plane VM.
+      tolerations:
+        - key: 'node-role.kubernetes.io/control-plane'
+          operator: 'Exists'
+          effect: 'NoSchedule'
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ''
+
+---
+# SFTPPlus admin
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sftpplus-admin
+  namespace: manual-tests
+  labels:
+    app: sftpplus-admin
+    app.kubernetes.io/name: sftpplus-admin
+spec:
+  # Admin deployment should always have a single replica.
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app: sftpplus-admin
+  template:
+    metadata:
+      name: sftpplus-admin
+      namespace: manual-tests
+      labels:
+        app: sftpplus-admin
+
+    spec:
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: 'OnRootMismatch'
+
+      imagePullSecrets:
+        - name: ghcr.io-pat-adi-k8s-pull
+
+      # initContainers can be removed of the configuration was already
+      # initialized.
+      initContainers:
+        - name: sftpplus-admin-init
+          #image: proatria/sftpplus-trial:latest
+          image: ghcr.io/chevah/sftpplus-trial:latest
+          command: ['/bin/sh']
+          args: ['/opt/sftpplus/configuration/admin-init.sh']
+          env:
+            - name: 'SFTPPLUS_CONFIGURATION'
+              value: '/opt/sftpplus-storage/configuration'
+          volumeMounts:
+            - name: sftpplus-storage
+              mountPath: /opt/sftpplus-storage
+            - name: sftpplus-admin-init
+              mountPath: /opt/sftpplus/configuration
+
+      containers:
+        - name: admin
+          # image: proatria/sftpplus-trial:latest
+          image: ghcr.io/chevah/sftpplus-trial:latest
+          imagePullPolicy: Always
+          command: ['/bin/sh']
+          args: ['/opt/sftpplus-docker-entrypoint.sh']
+          env:
+            - name: 'SFTPPLUS_CONFIGURATION'
+              value: '/opt/sftpplus-storage/configuration'
+          ports:
+            - name: manager-https
+              containerPort: 10020
+            - name: manager-http
+              containerPort: 10019
+          volumeMounts:
+            - name: sftpplus-storage
+              mountPath: /opt/sftpplus-storage
+            - name: sftpplus-admin-init
+              mountPath: /opt/sftpplus/configuration
+
+      volumes:
+        - name: sftpplus-storage
+          persistentVolumeClaim:
+            claimName: sftpplus-storage
+        - name: sftpplus-admin-init
+          configMap:
+            name: sftpplus-admin-init-v1
+
+      # # Deploy on nieves
+      # nodeSelector:
+      #   kubernetes.io/hostname: nieves
+      # Deploy on control plane VM.
+      tolerations:
+        - key: 'node-role.kubernetes.io/control-plane'
+          operator: 'Exists'
+          effect: 'NoSchedule'
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ''
+
+---
+# Expose the worker ports outside of the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sftpplus-worker
+  namespace: manual-tests
+spec:
+  type: NodePort
+  selector:
+    app: sftpplus-worker
+  # We allow the cluster to allocate random node ports.
+  ports:
+    - name: sftp
+      port: 10022
+      targetPort: 10022
+      protocol: TCP
+    - name: https
+      port: 10443
+      targetPort: 10443
+      protocol: TCP
+
+---
+# Expose the admin port outside of the cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sftpplus-admin-node-port
+  namespace: manual-tests
+spec:
+  type: NodePort
+  selector:
+    app: sftpplus-admin
+  # We allow the cluster to allocate random node ports.
+  ports:
+    - name: https-admin
+      port: 10020
+      targetPort: 10020
+      protocol: TCP
+
+---
+# Expose the admin as cluster-ip for nginx-ingress
+apiVersion: v1
+kind: Service
+metadata:
+  name: sftpplus-admin-cluster-ip
+  namespace: manual-tests
+spec:
+  selector:
+    app: sftpplus-admin
+  ports:
+    - protocol: TCP
+      port: 10019
+      targetPort: 10019
+
+---
+# TLS certificate for nginx-controller
+# cat test_data/pki/server-self-signed-cert-and-key-2048.pem | base64 -w 0
+apiVersion: v1
+kind: Secret
+metadata:
+  name: sftpplus-admin-tls
+  namespace: manual-tests
+type: kubernetes.io/tls
+data:
+  tls.crt: YOUR-PUBLIC-HTTP-CERT-PEM-AS-BASE64
+  tls.key: YOUR-PUBLIC-HTTP-KEY-PEM-AS-BASE64
+
+---
+# Expose the admin port via nginx
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sftpplus-admin-service
+  namespace: manual-tests
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - sftpplus-admin.chevah.com
+      secretName: sftpplus-admin-tls
+  rules:
+    - host: sftpplus-admin.chevah.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: sftpplus-admin-cluster-ip
+                port:
+                  number: 10019
